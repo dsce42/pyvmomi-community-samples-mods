@@ -24,6 +24,21 @@ Thanks to "reuben.13@gmail.com" for the initial code.
 
 Note: Example code For testing purposes only
 vSphere Python SDK program to perform snapshot operations.
+
+
+2020-12-17
+Extended by Chris Ebersbach <github-dsce42@fuerdiemenschen.de>
+- Added
+  - in main(): try section for connect to vsphere section
+  - script args:
+     - --vm_name
+     - --snapshot_operation
+     - --snapshot_name
+     - --snapshot_description
+     - --ignore_ssl
+     - --verbose
+  - replaced:
+     - static "inputs" dict with (values of) those args
 """
 
 import atexit
@@ -31,22 +46,80 @@ import argparse
 import sys
 import time
 import ssl
+import getpass
 
 from pyVmomi import vim, vmodl
 from pyVim.task import WaitForTask
 from pyVim import connect
 from pyVim.connect import Disconnect, SmartConnect, GetSi
 
-inputs = {'vcenter_ip': '192.168.1.10',
-          'vcenter_password': 'my_password',
-          'vcenter_user': 'root',
-          'vm_name': 'dummy_vm',
-          # operation in 'create/remove/revert/
-          # list_all/list_current/remove_all'
-          'operation': 'create',
-          'snapshot_name': 'snap1',
-          'ignore_ssl': True
-          }
+def get_args():
+    """Get command line args from the user.
+    """
+    parser = argparse.ArgumentParser(
+        description='Standard Arguments for talking to vCenter')
+
+    # because -h is reserved for 'help' we use -s for service
+    parser.add_argument('-s', '--host',
+                        required=True,
+                        action='store',
+                        help='vSphere service to connect to')
+
+    # because we want -p for password, we use -o for port
+    parser.add_argument('-o', '--port',
+                        type=int,
+                        default=443,
+                        action='store',
+                        help='Port to connect on')
+
+    parser.add_argument('-u', '--user',
+                        required=True,
+                        action='store',
+                        help='User name to use when connecting to host')
+
+    parser.add_argument('-p', '--password',
+                        required=False,
+                        action='store',
+                        help='Password to use when connecting to host')
+
+    parser.add_argument('-vn', '--vm_name',
+                        required=True,
+                        action='store',
+                        help='Name of virtual machine to perfom snapshot operation against')
+
+    parser.add_argument('-so', '--snapshot_operation',
+                        required=False,
+                        action='store',
+                        help='Snapshot operation (create/remove/revert/list_all/list_current/remove_all) that should be performed against specified VM (defaults to list_all)')
+
+    parser.add_argument('-sn', '--snapshot_name',
+                        required=False,
+                        action='store',
+                        help='Name of the VM Snapshot that the --snapshot_operation (create/remove/revert) should be performed against')
+
+    parser.add_argument('-sd', '--snapshot_description',
+                        required=False,
+                        action='store',
+                        help='Description of the VM Snapshot (useful when --snapshot_operation = create')
+
+    parser.add_argument('-is', '--ignore_ssl',
+                        required=False,
+                        action='store',
+                        help='Whether or not invalid SSL certficates should be ignored')
+
+    parser.add_argument('-vb', '--verbose',
+                        required=False,
+                        action='store_true',
+                        help='Show verbose output')
+
+    args = parser.parse_args()
+
+    if not args.password:
+        args.password = getpass.getpass(
+            prompt='Enter password for host %s and user %s: ' %
+                   (args.host, args.user))
+    return args
+
 
 
 def get_obj(content, vimtype, name):
@@ -99,27 +172,61 @@ def get_current_snap_obj(snapshots, snapob):
 
 def main():
 
+    args = get_args()
+
+    if args.verbose:
+      verbose_on=True
+    else:
+      verbose_on=False
+
+    if args.ignore_ssl:
+      ignore_ssl=True
+    else:
+      ignore_ssl=False
+
+    if args.snapshot_description:
+      arg_snapshot_description=args.snapshot_description
+    else:
+      arg_snapshot_description='No snapshot description provided'
+
     si = None
 
-    print("Trying to connect to VCENTER SERVER . . .")
+    if verbose_on:
+      print("Trying to connect to VCENTER SERVER . . .")
 
     context = None
-    if inputs['ignore_ssl'] and hasattr(ssl, "_create_unverified_context"):
+    if ignore_ssl and hasattr(ssl, "_create_unverified_context"):
         context = ssl._create_unverified_context()
 
-    si = connect.Connect(inputs['vcenter_ip'], 443,
-                         inputs['vcenter_user'], inputs[
-                             'vcenter_password'],
-                         sslContext=context)
+    try:
+        si = connect.SmartConnect(host=args.host,
+                                                user=args.user,
+                                                pwd=args.password,
+                                                port=int(args.port))
+
+        atexit.register(connect.Disconnect, si)
+
+        if verbose_on:
+          print("Connected to vcenter server {}!".format(args.host))
+          # NOTE (hartsock): only a successfully authenticated session has a
+          # session key aka session id.
+          session_id = si.content.sessionManager.currentSession.key
+          print("current session id: {}".format(session_id))
+
+
+    except vmodl.MethodFault as error:
+        print("Caught vmodl fault : " + error.msg)
+        return -1
+
 
     atexit.register(Disconnect, si)
 
-    print("Connected to VCENTER SERVER !")
 
     content = si.RetrieveContent()
 
-    operation = inputs['operation']
-    vm_name = inputs['vm_name']
+    operation = args.snapshot_operation
+    vm_name = args.vm_name
+    arg_snapshot_name = args.snapshot_name
 
     vm = get_obj(content, [vim.VirtualMachine], vm_name)
 
@@ -132,8 +239,8 @@ def main():
         sys.exit()
 
     if operation == 'create':
-        snapshot_name = inputs['snapshot_name']
-        description = "Test snapshot"
+        snapshot_name = arg_snapshot_name
+        description = arg_snapshot_description
         dumpMemory = False
         quiesce = False
 
@@ -143,7 +250,7 @@ def main():
             snapshot_name, description, dumpMemory, quiesce))
 
     elif operation in ['remove', 'revert']:
-        snapshot_name = inputs['snapshot_name']
+        snapshot_name = arg_snapshot_name
         snap_obj = get_snapshots_by_name_recursively(
                             vm.snapshot.rootSnapshotList, snapshot_name)
         # if len(snap_obj) is 0; then no snapshots with specified name
@@ -186,6 +293,8 @@ def main():
     else:
         print("Specify operation in "
               "create/remove/revert/list_all/list_current/remove_all")
+
+    return 0
 
 # Start program
 if __name__ == "__main__":
